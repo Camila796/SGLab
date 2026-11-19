@@ -15,4 +15,6 @@ return array(
     'OTPHP\\' => array($vendorDir . '/spomky-labs/otphp/src'),
     'GrahamCampbell\\ResultType\\' => array($vendorDir . '/graham-campbell/result-type/src'),
     'Dotenv\\' => array($vendorDir . '/vlucas/phpdotenv/src'),
+    'App\\Models\\' => array($baseDir . '/Models'),
+    'App\\Controllers\\' => array($baseDir . '/Controllers'),
 );

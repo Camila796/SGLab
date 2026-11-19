@@ -1,69 +1,39 @@
 services:
-  webserver:
-    build:
-      context: ../
-      dockerfile: ./docker/php/Dockerfile
-    container_name: apache_web
+  web:
+    image: php:8.2-apache
+    container_name: sglab_web
+    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "8080:80"
     volumes:
-      - public:/var/www/html
-     # - ../certs/etc:/etc/letsencrypt
-    environment:
-      - DB_HOST=database
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
+      - ./public-WEB:/var/www/html
     depends_on:
-      database:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - app-network
+      - db
 
-  database:
-    image: mysql:8.0
-    container_name: db
+  db:
+    image: mariadb:10.6
+    container_name: sglab_db
+    restart: unless-stopped
     environment:
-      ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: sglab_db
+      MYSQL_USER: sglab_user
+      MYSQL_PASSWORD: sglab_password
     ports:
-      - "3306:3306"
+      - "3308:3306"
     volumes:
-      - .sql:/docker-entrypoint-initdb.d
-      - mysql-data:/var/lib/mysql  # Volumen persistente para datos
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: unless-stopped
-    networks:
-      - app-network
-  
-    image: certbot/certbot
-    container_name: certbot_renew
-    volumes:
-      - ../certs/etc:/etc/letsencrypt
-      - ../certs/lib:/var/lib/letsencrypt
-      - ../www:/var/www/html
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot --webroot-path=/var/www/html; sleep 12h & wait $${!}; done;'"
-    depends_on:
-      - webserver
-    restart: unless-stopped
-    networks:
-      - app-network
+      - db_data:/var/lib/mysql
+      - ./sglab.sql:/docker-entrypoint-initdb.d/sglab.sql:ro
 
-# Volúmenes nombrados para persistencia
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: sglab_phpmyadmin
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    environment:
+      PMA_HOST: db
+      MYSQL_ROOT_PASSWORD: rootpassword
+
 volumes:
-  mysql-data:
-    driver: local
-
-# Red personalizada para comunicación entre contenedores
-networks:
-  app-network:
-    driver: bridge
+  db_data:

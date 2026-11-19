@@ -87,6 +87,20 @@ class Equipo {
         }
     }
 
+    public static function obtenerPorSerial($serialNumber) {
+        $db = Database::getConnection('admin');
+        $stmt = $db->prepare("SELECT * FROM Equipos WHERE serialNumber = :serialNumber");
+        $stmt->execute([':serialNumber' => $serialNumber]);
+        return $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
+    public static function obtenerPorHostname($hostname) {
+        $db = Database::getConnection('admin');
+        $stmt = $db->prepare("SELECT * FROM Equipos WHERE hostname = :hostname");
+        $stmt->execute([':hostname' => $hostname]);
+        return $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
     public static function crearEquipo($serialNumber, $hostname, $CPU, $RAM, $diskType, $diskTotal, $idLaboratorio = null) {
         $db = Database::getConnection('admin');
         try {

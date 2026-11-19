@@ -1,2 +1,7 @@
 .vs/
 .env
+.env.docker
+
+# Basura de macOS (AppleDouble) y de Windows al copiar por USB/red
+._*
+*:Zone.Identifier

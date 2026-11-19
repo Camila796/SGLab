@@ -1,0 +1,4 @@
+# La raíz del sitio contiene archivos que no deben descargarse por HTTP
+<FilesMatch "(^\.env.*|\.(sql|lock|phar|log|yml|sh))$">
+    Require all denied
+</FilesMatch>

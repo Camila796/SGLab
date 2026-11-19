@@ -3,22 +3,42 @@ param(
     [int]$cedula = 0
 )
 
-$usuario = "Tecnicatura"
-#$usuario = [Environment]::UserName
-#$usuario = $usuario.ToLower()
-$servidor = "192.168.2.46"
-$laboratorio= "LAB6"
-$destino = "/home/" + $usuario + "/SGLAB/" + $laboratorio
+# Servidor SGLAB (Docker): URL del endpoint. Se puede sobreescribir con la variable de entorno
+# SGLAB_API_URL sin tocar el script, util porque la IP real del servidor cambia segun la red
+# donde se despliegue (ej. red de pruebas Ceibal vs. la red del MikroTik del laboratorio).
+# Valor por defecto: IP del servidor detectada en la red del MikroTik del laboratorio
+# (192.168.88.0/24, gateway 192.168.88.1). Si el servidor recibe otra IP por DHCP, actualizar
+# este valor o asignarle una IP estatica fuera del rango DHCP (ver doc/REGISTRO_PS1.md).
+$apiUrl = if ($env:SGLAB_API_URL) { $env:SGLAB_API_URL } else { "http://192.168.88.190:8080/api/api_registro.php" }
+# Debe coincidir con API_SECRET_KEY en public-WEB/.env
+$apiKey = if ($env:SGLAB_API_KEY) { $env:SGLAB_API_KEY } else { "CAMBIAR_ESTA_CLAVE" }
+# Debe coincidir con Laboratorios.nombre en la base de datos
+$laboratorio = "Laboratorio 6"
 $clavePrivada = Join-Path $env:USERPROFILE ".ssh/id_rsa"
-# $log variable removed as it was unused
 
+# Carpeta propia del agente para reportes y log (no el Escritorio: el agente corre
+# repetidamente en segundo plano vía Tarea Programada y no debe ensuciar el Escritorio).
+$carpetaDatos = Join-Path $env:LOCALAPPDATA "SGLAB"
+$carpetaReportes = Join-Path $carpetaDatos "Reportes"
+$archivoLog = Join-Path $carpetaDatos "agente.log"
+New-Item -ItemType Directory -Path $carpetaReportes -Force | Out-Null
+
+function Escribir-Log {
+    param([string]$mensaje)
+    $linea = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $mensaje"
+    Add-Content -Path $archivoLog -Value $linea
+    Write-Output $mensaje
+}
+
+Escribir-Log "Iniciando ejecucion del agente SGLAB"
 
 # Obtener fecha y nombre del equipo
 $fecha = Get-Date -Format "yyyyMMdd"
 $fechaLegible = Get-Date -Format "yyyy/MM/dd (HH:mm)"
 $nombrePC = $env:COMPUTERNAME
 $serialPC = $((Get-CimInstance Win32_BIOS).SerialNumber)
-$serial = $serialPC.Trim()
+$serial = "$serialPC".Trim()
+if (-not $serial) { $serial = $nombrePC }
 # Función para generar clave SSH si no existe
 function New-SSHKey {
     $sshDir = "$env:USERPROFILE\.ssh"
@@ -93,7 +113,11 @@ Write-Output "=========================================="
 # Intentar hacer ping al Gateway
 Write-Output "Verificando conectividad..."
 try {
-    $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0").NextHop
+    # Con varias interfaces (VPN, WSL, Hyper-V) se usa la ruta que Windows prefiere
+    $ruta = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
+        Sort-Object { $_.RouteMetric + $_.InterfaceMetric } |
+        Select-Object -First 1
+    $gateway = $ruta.NextHop
     $ping = Test-Connection -ComputerName $gateway -Count 1 -Quiet
     if ($ping) {
         $estado = "Exito"
@@ -111,14 +135,29 @@ catch {
 Write-Output "Recopilando información del sistema..."
 try {
     $so = Get-CimInstance Win32_OperatingSystem
-    $ipInfo = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.PrefixOrigin -eq "Dhcp" -or $_.PrefixOrigin -eq "Manual"} | Select-Object -First 1
-    $cpu = Get-CimInstance Win32_Processor
+    $filtroIP = @{ AddressFamily = "IPv4" }
+    if ($ruta) { $filtroIP.InterfaceIndex = $ruta.InterfaceIndex }
+    $ipInfo = Get-NetIPAddress @filtroIP | Where-Object {$_.PrefixOrigin -eq "Dhcp" -or $_.PrefixOrigin -eq "Manual"} | Select-Object -First 1
+    $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+    $cpuUso = [int]$cpu.LoadPercentage
     $ram = [math]::Round($so.TotalVisibleMemorySize / 1024 / 1024, 2)
     $disco = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
     $discoTotal = [math]::Round($disco.Size / 1GB, 2)
+    $discoLibre = [math]::Round($disco.FreeSpace / 1GB, 2)
+    $discoUso = [math]::Round(($disco.Size - $disco.FreeSpace) / $disco.Size * 100, 2)
+    $ramUsoPorc = [math]::Round(($so.TotalVisibleMemorySize - $so.FreePhysicalMemory) / $so.TotalVisibleMemorySize * 100, 2)
+    $discoTipo = "Desconocido"
+    try {
+        $numeroDisco = (Get-Partition -DriveLetter C -ErrorAction Stop).DiskNumber
+        $discoFisico = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq "$numeroDisco" }
+        if ($discoFisico.MediaType) { $discoTipo = "$($discoFisico.MediaType)" }
+    }
+    catch {
+        Write-Output "No se pudo determinar el tipo de disco: $($_.Exception.Message)"
+    }
 }
 catch {
-    Write-Output "Error al recopilar información del sistema: $($_.Exception.Message)"
+    Escribir-Log "ERROR - No se pudo recopilar informacion del sistema: $($_.Exception.Message)"
     exit 1
 }
 
@@ -172,14 +211,14 @@ if ($cedula -eq 0) {
     } until ($cedulaValida)
 }
 
-# Ruta y nombre de archivo de salida (en el Escritorio del usuario)
-$escritorio = [Environment]::GetFolderPath("Desktop")
-$archivo = Join-Path $escritorio "$fecha-$nombrePC-$estado-$serial.toml"
+# Ruta y nombre de archivo de salida (un archivo por día por equipo; se sobrescribe
+# en corridas sucesivas del mismo día para no acumular archivos en cada ejecución del agente)
+$archivo = Join-Path $carpetaReportes "$fecha-$nombrePC-$serial.toml"
 
 # Crear contenido TOML
 $contenido = @"
 [info_general]
-serial = $serial
+serial = "$serial"
 fecha = "$($fechaLegible)"
 nombre_pc = "$($nombrePC)"
 estado_conexion = "$($estado)"
@@ -226,7 +265,7 @@ try {
     Write-Output "Archivo TOML guardado: $archivo"
 }
 catch {
-    Write-Output "Error al guardar archivo: $($_.Exception.Message)"
+    Escribir-Log "ERROR - No se pudo guardar archivo local $archivo : $($_.Exception.Message)"
     Write-Output "========== SCRIPT con ERROR=========="
     exit 1
 }
@@ -235,61 +274,47 @@ catch {
 Write-Output ""
 Write-Output "========== DIAGNOSTICO COMPLETADO =========="
 Write-Output "Archivo generado: $archivo"
-Write-Output "Usuario: $usuario"
-Write-Output "Servidor SSH: $servidor"
-Write-Output "Directorio destino: $destino"
+Write-Output "API SGLAB: $apiUrl"
 Write-Output ""
 Write-Output "========== CLAVE SSH PUBLICA =========="
 Write-Output $clavePublica
 Write-Output "======================================"
-Start-Sleep 2
-# Código SCP con verificación de directorio destino
-try {
-	$ping = Test-Connection -ComputerName $servidor -Count 1 -Quiet
-	    if ($ping) {
-            # Verificar si el directorio destino existe en el servidor
-            Write-Output "Verificando directorio destino en servidor..."
-            $checkDirCmd = "ssh -i `"$clavePrivada`" -o StrictHostKeyChecking=no ${usuario}@${servidor} 'test -d ${destino} && echo EXISTS || echo NOTEXISTS'"
-            try {
-                $dirExists = Invoke-Expression $checkDirCmd
-                if ($dirExists -match "NOTEXISTS") {
-                    Write-Output "El directorio ${destino} no existe en el servidor ${servidor}"
-                    Write-Output "Intenta crear el directorio con: ssh ${usuario}@${servidor} 'mkdir -p ${destino}'"
-                    Write-Output "========== SCRIPT con ERROR=========="
-                    exit 1
-                }
-                Write-Output "Directorio destino verificado: ${destino}"
-            }
-            catch {
-                Write-Output "Error al verificar directorio destino: $($_.Exception.Message)"
-                Write-Output "Continuando con SCP de todas formas..."
-            }
 
-            # Subir archivo con SCP
-            try {
-                Write-Output "Subiendo archivo:  scp -i `"$clavePrivada`" `"$archivo`" ${usuario}@${servidor}:${destino}/"
-		        scp -i "$clavePrivada" -o StrictHostKeyChecking=no "$archivo" "${usuario}@${servidor}:${destino}/"
-                Write-Output "========== SCRIPT COMPLETADO con EXITO=========="
-            }
-            catch {
-                Write-Output "Error al Subir archivo: $($_.Exception.Message)"
-                Write-Output "No existe el ${destino}, en el ${servidor}..."
-                Write-Output "========== SCRIPT con ERROR=========="
-                exit 1
-            }
-        }
-        else {
-      	    Write-Output "Fallo: Revisar conexion a servidor SSH: $servidor"
-            Write-Output "========== SCRIPT CON ERROR=========="
-            Write-Output "========== HAY QUE ESTAR EN LA RED DE UTU (192.168.2.0/24)=========="
-            Write-Output "========== Tu dirección ip actual es=($($ipInfo.IPAddress))=========="
-    	    exit 1
-        }
+# Enviar el reporte a SGLAB, que lo guarda en la base de datos
+$reporte = [ordered]@{
+    serial          = $serial
+    hostname        = $nombrePC
+    laboratorio     = $laboratorio
+    cedula          = $cedula
+    estado          = ($estado -eq "Exito")
+    ip              = "$($ipInfo.IPAddress)"
+    mascara         = "$($ipInfo.PrefixLength)"
+    gateway         = "$gateway"
+    so              = "$($so.Caption)"
+    so_version      = "$($so.Version)"
+    usuario_windows = $env:USERNAME
+    cpu             = "$($cpu.Name)".Trim()
+    ram_gb          = $ram
+    disco_tipo      = $discoTipo
+    disco_total_gb  = $discoTotal
+    disco_libre_gb  = $discoLibre
+    cpu_uso         = $cpuUso
+    ram_uso         = $ramUsoPorc
+    disco_uso       = $discoUso
+}
+
+try {
+    # Se envian bytes UTF-8: Windows PowerShell 5.1 no lo hace por defecto
+    $cuerpo = [Text.Encoding]::UTF8.GetBytes(($reporte | ConvertTo-Json))
+    $respuesta = Invoke-RestMethod -Uri $apiUrl -Method Post -Body $cuerpo -TimeoutSec 15 `
+        -ContentType "application/json; charset=utf-8" -Headers @{ "X-API-KEY" = $apiKey }
+    Escribir-Log "OK - Respuesta de SGLAB: $($respuesta.mensaje) (serial: $serial)"
+    Write-Output "========== SCRIPT COMPLETADO con EXITO=========="
 }
 catch {
-    Write-Output "Error al ejecutar ping: $($_.Exception.Message)"
+    $detalle = if ($_.ErrorDetails.Message) { " | Detalle: $($_.ErrorDetails.Message)" } else { "" }
+    Escribir-Log "ERROR - No se pudo enviar el reporte a ${apiUrl}: $($_.Exception.Message)$detalle"
+    Write-Output "Tu direccion IP actual es: $($ipInfo.IPAddress). El reporte quedo guardado en $archivo"
     Write-Output "========== SCRIPT con ERROR=========="
     exit 1
 }
-
-Write-Output "========== SCRIPT COMPLETADO con EXITO=========="

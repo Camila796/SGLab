@@ -81,7 +81,7 @@ CREATE TABLE Laboratorios (
 -- Tabla Equipos
 CREATE TABLE Equipos (
     idEquipo INT(5) PRIMARY KEY AUTO_INCREMENT,
-    serialNumber INT(8) UNIQUE,
+    serialNumber VARCHAR(100) UNIQUE,
     hostname VARCHAR(100) NOT NULL UNIQUE,
     CPU VARCHAR(100) NOT NULL,
     RAM INT(4) NOT NULL,
@@ -128,7 +128,8 @@ INSERT INTO Laboratorios (nombre, comentario) VALUES
 ('Laboratorio 2', 'Laboratorio de programación'),
 ('Laboratorio 3', 'Laboratorio de redes'),
 ('Laboratorio 4', 'Laboratorio de investigación'),
-('Laboratorio 5', 'Laboratorio multimedia');
+('Laboratorio 5', 'Laboratorio multimedia'),
+('Laboratorio 6', 'Laboratorio de la tecnicatura');
 
 
 
